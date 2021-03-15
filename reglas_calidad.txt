@@ -1,0 +1,90 @@
+#################################################################
+No pueden existir afiliados con edad cumplida menor a 12 años
+
+def fn_check_afiliado_younger_12(element):
+    if (str(element["FechaNacimiento"])) is not None:
+        age = calculate_age(datetime.strptime(element["FechaNacimiento"], "%Y%m%d"))
+        if (float(age) <= float(12)):
+            element["validacionDetected"] = element["validacionDetected"] + "afiliado menor a 12 años,"
+    return element
+################################################################
+
+Nombres y apellidos solo debe tener caracteres alfabeticos. No puede contener caracteres diferentes  (,), (;), (-)
+
+def fn_check_nombre(element, key):
+    if element["key"] is not None:
+        if element["key"].find(",") != -1 or element["key"].find(";") != -1 or element["key"].find("-") != -1:
+            element["validacionDetected"] = element["validacionDetected"] + "caracter especial encontrado, "
+            if element.strip().isalpha() ==False:
+                element["validacionDetected"] = element["validacionDetected"] + "nombre no es solo texto, "
+        return element
+
+##################################################################
+Afiliados con Tipo de Identificacion = 'TI'  o 'RCN' con edad cumplida mayor o igual a 18
+
+def fn_check_tipo_identificacion_age(element):
+    if element["TipoDocumentoDeLaPersona"] is not None:
+        if element["TipoDocumentoDeLaPersona"]= "TI" or element["TipoDocumentoDeLaPersona"] = "RCN":
+            age = calculate_age(datetime.strptime(element["FechaNacimiento"], "%Y%m%d"))
+            if (float(age) >= float(18)):
+                element["validacionDetected"] = element["validacionDetected"] + "Afiliado con identificacion TI o RCN con edad igual o mayor a 18 años, "
+        return element
+
+####################################################################
+Tipo de Indentificacion =  'PAS'  cuyo largo del numero de identificacion sea = '11' y cuyos tres priomeros caracteres del Numero de identificacion sea '999' es inconsistente
+
+def fn_check_ID_PAS(element):
+    if element["TipoDocumentoDeLaPersona"] is not None and element["DocumentoDeLaPersona"] is not None:
+        if element["TipoDocumentoDeLaPersona"]= "PAS":
+            if len(str(element["DocumentoDeLaPersona"])) ==11:
+                if element["DocumentoDeLaPersona"][:3] =='999':
+                    element["validacionDetected"] = element["validacionDetected"] + "Afiliado con identificacion inconsistente, "
+        return element
+
+###########################################################################
+
+Afiliados con TI cuyo numero de identificacion tenga largo 11, los primeros 6 caracteres debe coincidir con fecha de nacimiento formato 'AAMMDD'
+
+def fn_check_ID_TI(element):
+    if element["TipoDocumentoDeLaPersona"] is not None and element["DocumentoDeLaPersona"] is not None:
+        if element["TipoDocumentoDeLaPersona"]= "TI":
+            if len(str(element["DocumentoDeLaPersona"])) ==11:
+                fecha_iso = datetime.datetime.fromisoformat(element["FechaNacimiento"]).strftime('%Y%m%d')
+                if element["DocumentoDeLaPersona"][:4] != fecha_iso[2:6]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Afiliado con identificacion TI inconsistente, "
+        return element
+
+########################################################################
+Primer Nombre No puede coincidir con el primer Apellido
+Primer Nombre No puede coincidir con el Segundo Apellido
+Segundo Nombre No puede coincidir con el primer Apellido
+Segundo Nombre No puede coincidir con el Segundo Apellido
+Primer Nombre No puede coincidir con Segundo Nombre
+
+
+def fn_check_nombre_others(element):
+    if element["Nombre"] is not None:
+        list_name = element["Nombre"].split(" ")
+            if len(list_name)=4:
+                if list_name[0]=list_name[1]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Primer Nombre coincide con Segundo Nombre, "
+                if list_name[0]=list_name[2]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Primer Nombre coincide con Primer Apellido, "
+                if list_name[0]=list_name[3]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Primer Nombre coincide con Segundo Apellido, "
+                            
+            elif len(list_name)=3:
+                if list_name[0]=list_name[1]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Primer Nombre coincide con Primer Apellido, "
+                if list_name[0]=list_name[2]:
+                    element["validacionDetected"] = element["validacionDetected"] + "Primer Nombre coincide con Segundo Apellido, "
+        return element
+
+####################################################################
+Fecha de nacimiento en Blanco
+
+def fn_check_fecha_nacimiento_null(element):
+    if element["FechaNacimiento"] is not None
+        if (str(element["FechaNacimiento"])) is None:
+                element["validacionDetected"] = element["validacionDetected"] + "fecha de nacimiento vacía o en blanco,"
+        return element
