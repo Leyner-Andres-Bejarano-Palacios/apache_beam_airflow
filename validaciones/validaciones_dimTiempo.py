@@ -1,40 +1,27 @@
 # -*- coding: utf-8 -*-
 
-import uuid
+
+
+
 import time
-import types 
+import uuid
+import types
 import threading
 import numpy as np
 import pandas as pd
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from tableCreator import TableCreator
+from google.cloud import bigquery as bq
+from validaciones.validador import Validador
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
+from validaciones.helperfunctions import fn_divide_clean_dirty
 from apache_beam.options.pipeline_options import PipelineOptions
 
 
-
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='dimtiempoapachebeamjobname',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
-
-
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimTiempo')
-
-
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimTiempo_dirty')
 
 
   
@@ -65,29 +52,34 @@ table_schema_dimTiempo_malos = {
         ]
 }
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
-
 
 
 if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+    tableCreator = TableCreator()
+    validador = Validador(tableCreator._vConfig)
+    options1 = PipelineOptions(
+    argv= None,
+    runner=config['configService']['runner'],
+    project=config['configService']['project'],
+    job_name='dimtiempoapachebeamjobname',
+    temp_location=config['configService']['temp_location'],
+    region=config['configService']['region'],
+    service_account_email=config['configService']['service_account_email'],
+    save_main_session= config['configService']['save_main_session'])
+
+
+    table_spec_clean = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='Datamart',
+        tableId='dimTiempo')
+
+
+    table_spec_dirty = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='Datamart',
+        tableId='dimTiempo_dirty')     
+        
+    p = beam.Pipeline(options=options1)        
     dimTiempo  = (
         p
         | 'Query Table dimTiempo' >> beam.io.ReadFromBigQuery(

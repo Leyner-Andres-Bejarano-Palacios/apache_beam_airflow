@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 
 
-import uuid
+
 import time
+import uuid
 import types
 import threading
 import numpy as np
 import pandas as pd
+import configparser
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from google.cloud import bigquery as bq
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -17,30 +22,29 @@ from apache_beam.options.pipeline_options import PipelineOptions
 
 
 
+class fn_divide_clean_dirty(beam.DoFn):
+    def process(self, element):
+        correct = False
+        if element["validacionDetected"] == "":
+            correct = True
+            del element["validacionDetected"]
+
+        if correct == True:
+            yield pvalue.TaggedOutput('Clean', element)
+        else:
+            yield pvalue.TaggedOutput('validationsDetected', element)
 
 
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='dimestadocupon-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
+class ValidadorEstadoCuponLogic():
+    def __init__(self, config):
+        self._vName = self.__class__.__name__
+        self._vConfig = config
 
-
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimEstadoCupon')
-
-
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimEstadoCupon_dirty')
-
+    @staticmethod
+    def fn_check_completitud(element,key):
+        if (element[key] is None  or str(element[key]).lower() == "none" or (element[key]).lower() == "null" or str(element[key]).replace(" ","") == ""):
+            element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
+        return element 
 
   
 table_schema_dimEstadoCupon = {
@@ -62,42 +66,43 @@ table_schema_dimEstadoCupon_malos = {
 }
 
 
-
-def calculate_age(born):
-    today = date.today()
-    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
-
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
+config = configparser.ConfigParser()
+config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+validador = ValidadorEstadoCuponLogic(config)
+options1 = PipelineOptions(
+    argv= None,
+    runner=config['configService']['runner'],
+    project=config['configService']['project'],
+    job_name='dimestadocupon-apache-beam-job-name',
+    temp_location=config['configService']['temp_location'],
+    region=config['configService']['region'],
+    service_account_email=config['configService']['service_account_email'],
+    save_main_session= config['configService']['save_main_session'])
 
 
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
+table_spec_clean = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_dimEstadoCupon')
 
 
+table_spec_dirty = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_dimEstadoCupon_dirty')
 
-if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+with beam.Pipeline(options=options1) as p:
+
+                
+       
     dimEstadoCupon  = (
         p
         | 'Query Table Clientes' >> beam.io.ReadFromBigQuery(
             query='''
-            SELECT
-            GENERATE_UUID() as EstadoCuponID
-            , ESTADO_CUPON as EstadoCupon
-            FROM
-            afiliados-pensionados-prote.afiliados_pensionados.SUPERCUPON
+                select GENERATE_UUID() as EstadoCuponID, EstadoCupon from(SELECT distinct
+                ESTADO_CUPON as EstadoCupon
+                FROM
+                '''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_SUPERCUPON)
                 ''',\
             use_standard_sql=True))
 
@@ -111,9 +116,9 @@ if __name__ == "__main__":
                                                              'validacionDetected':""})
 
 
-    EstadoCuponID_fullness_validated = dimEstadoCupon_Dict | 'completitud EstadoCuponID' >> beam.Map(fn_check_completitud,    'EstadoCuponID' )
+    EstadoCuponID_fullness_validated = dimEstadoCupon_Dict | 'completitud EstadoCuponID' >> beam.Map(validador.fn_check_completitud,    'EstadoCuponID' )
 
-    EstadoCupon_fullness_validated = EstadoCuponID_fullness_validated | 'completitud EstadoCupon' >> beam.Map(fn_check_completitud,    'EstadoCupon' )
+    EstadoCupon_fullness_validated = EstadoCuponID_fullness_validated | 'completitud EstadoCupon' >> beam.Map(validador.fn_check_completitud,    'EstadoCupon' )
 
     
 
@@ -141,6 +146,6 @@ if __name__ == "__main__":
             write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
             create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED)
 
-    result = p.run()
-    result.wait_until_finish()
+
+
 

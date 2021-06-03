@@ -1,43 +1,29 @@
 # -*- coding: utf-8 -*-
 
 
-import uuid
+
+
+
 import time
-import types 
+import uuid
+import types
 import threading
 import numpy as np
 import pandas as pd
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from tableCreator import TableCreator
+from google.cloud import bigquery as bq
+from validaciones.validador import Validador
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
+from validaciones.helperfunctions import fn_divide_clean_dirty
 from apache_beam.options.pipeline_options import PipelineOptions
 
 
 
-
-
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='dimestadobono-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
-
-
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='afiliados_pensionados',
-    tableId='dimEstadoBono_clean')
-
-
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='afiliados_pensionados',
-    tableId='dimEstadoBono_dirty')
 
 
   
@@ -60,34 +46,38 @@ table_schema_dimEstadoBono_malos = {
 }
 
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
-
-
-
-
 
 if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+    config = configparser.ConfigParser()
+    config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+    validador = Validador(config)
+    options1 = PipelineOptions(
+    argv= None,
+    runner=config['configService']['runner'],
+    project=config['configService']['project'],
+    job_name='dimestadobono-apache-beam-job-name',
+    temp_location=config['configService']['temp_location'],
+    region=config['configService']['region'],
+    service_account_email=config['configService']['service_account_email'],
+    save_main_session= config['configService']['save_main_session'])
+
+
+    table_spec_clean = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='afiliados_pensionados',
+        tableId='dimEstadoBono_clean')
+
+
+    table_spec_dirty = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='afiliados_pensionados',
+        tableId='dimEstadoBono_dirty')  
     dimEstadoBonoID  = (
         p
         | 'Query Table Clientes' >> beam.io.ReadFromBigQuery(
             query='''
+                    SELECT 'None' CalculosActuarialesID, 'None' TiempoID, 'None' Inf_personasID, 'None' fechaDato, 'None' InteresTecnico,
+                    'None' InflacionLargoPlazo, 'None' FactorDeslizamiento, 'None' AjusteBeneficiarios,'None' as Comision, 'None' as SupuestoDeBeneficiarios 
 
                 ''',\
             use_standard_sql=True))
@@ -136,3 +126,4 @@ if __name__ == "__main__":
             
     result = p.run()
     result.wait_until_finish()
+

@@ -1,39 +1,51 @@
 # -*- coding: utf-8 -*-
 
-import uuid
+
+
 import time
+import uuid
 import types
 import threading
 import numpy as np
 import pandas as pd
+import configparser
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from google.cloud import bigquery as bq
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.options.pipeline_options import PipelineOptions
 
 
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='dimestado-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
 
 
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimEstado')
+class fn_divide_clean_dirty(beam.DoFn):
+    def process(self, element):
+        correct = False
+        if element["validacionDetected"] == "":
+            correct = True
+            del element["validacionDetected"]
+
+        if correct == True:
+            yield pvalue.TaggedOutput('Clean', element)
+        else:
+            yield pvalue.TaggedOutput('validationsDetected', element)
 
 
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='dimEstado_dirty')
+class ValidadorEstadoLogic():
+    def __init__(self, config):
+        self._vName = self.__class__.__name__
+        self._vConfig = config
+
+    @staticmethod
+    def fn_check_completitud(element,key):
+        if (element[key] is None  or str(element[key]).lower() == "none" or (element[key]).lower() == "null" or str(element[key]).replace(" ","") == ""):
+            element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
+        return element 
+
+
 
 
   
@@ -64,39 +76,47 @@ table_schema_dimEstado_malos = {
         ]
 }
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
 
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
+config = configparser.ConfigParser()
+config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+validador = ValidadorEstadoLogic(config)
+options1 = PipelineOptions(
+argv= None,
+runner=config['configService']['runner'],
+project=config['configService']['project'],
+job_name='dimestado-apache-beam-job-name',
+temp_location=config['configService']['temp_location'],
+region=config['configService']['region'],
+service_account_email=config['configService']['service_account_email'],
+save_main_session= config['configService']['save_main_session'])
 
 
+table_spec_clean = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_dimEstado')
 
-if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+
+table_spec_dirty = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_dimEstado_dirty')
+     
+with beam.Pipeline(options=options1) as p:
+   
+       
     dimEstado  = (
         p
         | 'Query Table dimEstado' >> beam.io.ReadFromBigQuery(
             query='''
-                SELECT GENERATE_UUID() as EstadoID, Estado, Descripcion, Atributo FROM
-                (SELECT distinct CODIGO_ESTADO_PENSION as Estado, DESCRIPCION_ESTADO_PENSION AS Descripcion , "Pension" Atributo
-                FROM `afiliados-pensionados-prote.afiliados_pensionados.ESTADO_PENSION`
-                UNION ALL
-                SELECT distinct CODIGO_ESTADO as EstadoD,DESCRIPCION_ESTADO as Descripcion, "Solicitud" Atributo
-                FROM `afiliados-pensionados-prote.afiliados_pensionados.ESTADO_SOLICITUD`)
+                    SELECT GENERATE_UUID() as EstadoID, Estado, Descripcion, Atributo FROM
+                    (SELECT distinct CODIGO_ESTADO as Estado, DESCRIPCION_ESTADO 
+                    AS Descripcion , "Pension" Atributo
+                    FROM `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_ESTADO_PENSION`
+                    UNION ALL
+                    SELECT distinct CODIGO_ESTADO as EstadoD,DESCRIPCION_ESTADO as Descripcion, 
+                    "Solicitud" Atributo
+                    FROM `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_ESTADO_SOLICITUD`)
                 ''',\
             use_standard_sql=True))
 
@@ -113,9 +133,9 @@ if __name__ == "__main__":
 
 
 
-    EstadoSolicitud_fullness_validated = dimEstado_Dict | 'completitud EstadoSolicitud' >> beam.Map(fn_check_completitud,    'Estado' )
+    EstadoSolicitud_fullness_validated = dimEstado_Dict | 'completitud EstadoSolicitud' >> beam.Map(validador.fn_check_completitud,    'Estado' )
     #. validaciones  EstadoSolicitudID
-    Atributo_fullness_validated = dimEstado_Dict | 'completitud Atributo' >> beam.Map(fn_check_completitud,    'Atributo' )
+    Atributo_fullness_validated = dimEstado_Dict | 'completitud Atributo' >> beam.Map(validador.fn_check_completitud,    'Atributo' )
 
     results = Atributo_fullness_validated | beam.ParDo(fn_divide_clean_dirty()).with_outputs()
 
@@ -139,6 +159,3 @@ if __name__ == "__main__":
             schema=table_schema_dimEstado,
             write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
             create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED)
-            
-    result = p.run()
-    result.wait_until_finish()

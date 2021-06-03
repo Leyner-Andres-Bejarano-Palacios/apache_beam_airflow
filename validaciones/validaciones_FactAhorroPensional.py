@@ -1,43 +1,30 @@
 # -*- coding: utf-8 -*-
 
 
-import uuid
+
+
+
 import time
+import uuid
 import types
 import threading
 import numpy as np
 import pandas as pd
+import configparser
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from tableCreator import TableCreator
+from google.cloud import bigquery as bq
+from validaciones.validador import Validador
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
+from validaciones.helperfunctions import fn_divide_clean_dirty
 from apache_beam.options.pipeline_options import PipelineOptions
 
 
 
-
-
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='factahorropensional-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
-
-
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='afiliados_pensionados',
-    tableId='FactAhorroPensional_clean')
-
-
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='afiliados_pensionados',
-    tableId='FactAhorroPensional_dirty')
 
 
   
@@ -101,98 +88,62 @@ table_schema_FactAhorroPensional_malos = {
 }
 
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
-
-def fn_check_value_in(key,listValues):
-    correct = False
-    for value in listValues:
-        if element[key] == value:
-            correct = True
-            break
-    if correct == False:
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado en lista,"
-    return element
-
-def fn_check_numbers(element,key):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (element[key].isnumeric() == True):
-            pass
-        else:
-            correct = True
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son numeros,"
-    return element
-
-
-def fn_check_text(element,key):
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (element[key].replace(" ","").isalpha() == False):
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son texto,"
-    return element
-
-def fn_check_bigger_than(element,key,valueToCompare):
-    if (element[key] is not None  and element[key] == "None" and element[key] == "null"):
-        try:
-            correct = False
-            cedulaNumerica = float(element[key].strip())
-            if  cedulaNumerica < float(valueToCompare):
-                element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es menor que "+str(valueToCompare)+","
-        finally:
-            pass
-    return element
-
 if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+    config = configparser.ConfigParser()
+    config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+    validador = Validador(config)
+    options1 = PipelineOptions(
+    argv= None,
+    runner=config['configService']['runner'],
+    project=config['configService']['project'],
+    job_name='factahorropensional-apache-beam-job-name',
+    temp_location=config['configService']['temp_location'],
+    region=config['configService']['region'],
+    service_account_email=config['configService']['service_account_email'],
+    save_main_session= config['configService']['save_main_session'])
+
+
+    table_spec_clean = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='afiliados_pensionados',
+        tableId='FactAhorroPensional_clean')
+
+
+    table_spec_dirty = bigquery.TableReference(
+        projectId=config['configService']['project'],
+        datasetId='afiliados_pensionados',
+        tableId='FactAhorroPensional_dirty')
+        
+    p = beam.Pipeline(options=options1)        
     FactAhorroPensional  = (
         p
         | 'Query Table Clientes' >> beam.io.ReadFromBigQuery(
             query='''
-// 1---------SaldoPEnsion , creemos que es el SALDO_PENSION_CUOTAS, validarlo con Maria
+                    SELECT
+                    GENERATE_UUID() as AhorroPensionalID
+                    ,a.InfPersonasID
+                    ,'None' TiempoID
+                    ,CURRENT_DATE() AS FechaDato
+                    ,c.SALDO_PENSION_CUOTAS
+                    ,'None' SumaAdicional   
+                    ,'None' saldoPension
+                    ,'None' CapitalNecesario
+                    ,'None' CapitalNecesarioSMLV
+                    ,'None' FaltanteCapital
+                    ,'None' FaltanteSumaAdicional
+                    , EXTRACT(YEAR FROM CURRENT_DATE()) as anno
+                    , EXTRACT(MONTH FROM CURRENT_DATE()) as mes
 
-// 2---------Los demas que estan en None los hace actuaria
-SELECT
-GENERATE_UUID() as AhorroPensionalID
-,a.InfPersonasID
-,'None' TiempoID
-,CURRENT_DATE() AS FechaDato
-,c.SALDO_PENSION_CUOTAS
-,'None' SumaAdicional   
-,'None' saldoPension
-,'None' CapitalNecesario
-,'None' CapitalNecesarioSMLV
-,'None' FaltanteCapital
-,'None' FaltanteSumaAdicional
-, EXTRACT(YEAR FROM CURRENT_DATE()) as anno
-, EXTRACT(MONTH FROM CURRENT_DATE()) as mes
-
-FROM
-afiliados-pensionados-prote.afiliados_pensionados.PenFutura c
-LEFT JOIN
-afiliados-pensionados-prote.Datamart.dimPensionados j
-ON
-j.DocumentoDeLaPersona=c.idAfiliado
-LEFT JOIN
-afiliados-pensionados-prote.Datamart.dimInfPersonas a
-on
-a.PensionadosId=j.PensionadosId
+                    FROM
+                    afiliados-pensionados-prote.afiliados_pensionados.PenFutura c
+                    LEFT JOIN
+                    afiliados-pensionados-prote.Datamart.dimPensionados j
+                    ON
+                    j.DocumentoDeLaPersona=c.idAfiliado
+                    LEFT JOIN
+                    afiliados-pensionados-prote.Datamart.dimInfPersonas a
+                    on
+                    a.PensionadosId=j.PensionadosId
                 ''',\
             use_standard_sql=True))
 
@@ -276,4 +227,6 @@ a.PensionadosId=j.PensionadosId
 
     result = p.run()
     result.wait_until_finish()
+
+
 

@@ -2,325 +2,405 @@
 
 
 
-import uuid
+
 import time
-import types 
+import uuid
+import types
 import threading
 import numpy as np
 import pandas as pd
+import configparser
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from google.cloud import bigquery as bq
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.options.pipeline_options import PipelineOptions
 
 
 
+class fn_divide_clean_dirty(beam.DoFn):
+    def process(self, element):
+        correct = False
+        if element["validacionDetected"] == "":
+            correct = True
+            del element["validacionDetected"]
+
+        if correct == True:
+            yield pvalue.TaggedOutput('Clean', element)
+        else:
+            yield pvalue.TaggedOutput('validationsDetected', element)
 
 
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='factbonos-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
+class ValidadorfactBonosLogic():
+    def __init__(self, config):
+        self._vName = self.__class__.__name__
+        self._vConfig = config
+
+    @staticmethod
+    def fn_check_completitud(element,key):
+        if (element[key] is None  or str(element[key]).lower() == "none" or (element[key]).lower() == "null" or str(element[key]).replace(" ","") == ""):
+            element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
+        return element
 
 
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='factBonos')
+    @staticmethod
+    def fn_check_bigger_than_other(element,key1,key2):
+        if (element[key1] is not None  and \
+            element[key1] != "None" and \
+            element[key1] != "null") and \
+            element[key1].strip().replace(",","").replace(".","").isnumeric() and \
+            element[key2] is not None  and \
+            element[key2] != "None" and \
+            element[key2] != "null" and \
+            element[key2].strip().replace(",","").replace(".","").isnumeric():
+            if float(element[key1].strip().replace(",","").replace(".","")) < \
+               float(element[key2].strip().replace(",","").replace(".","")):
+                element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key1) +" es menor que "+str(key2)+","
+        return element
 
 
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='factBonos_dirty')
+
+    @staticmethod
+    def fn_devoSaldo_lesser_than(element):
+        if (element["CAI"] is not None  and \
+            element["CAI"] != "None" and \
+            element["CAI"] != "null") and \
+            element["CAI"].strip().replace(",","").replace(".","").isnumeric() and \
+            element["DevolucionSaldos"] is not None  and \
+            element["DevolucionSaldos"] != "None" and \
+            element["DevolucionSaldos"] != "null" and \
+            element["DevolucionSaldos"].strip().replace(",","").replace(".","").isnumeric() and \
+            element["Bono"] is not None  and \
+            element["Bono"] != "None" and \
+            element["Bono"] != "null" and \
+            element["Bono"].strip().replace(",","").replace(".","").isnumeric():
+            if float(element["DevolucionSaldos"].strip().replace(",","").replace(".",""))  > \
+               (float(element["CAI"].strip().replace(",","").replace(".","")) + \
+                float(element["Bono"].strip().replace(",","").replace(".",""))):
+                element["validacionDetected"] = element["validacionDetected"] + "devolucion de saldo  es mayor a la suma de bono y saldo CAI,"
+        return element
 
 
-  
+    @staticmethod
+    def fn_devoSaldo_lesser_than_bono(element):
+        if (element["DevolucionSaldos"] is not None  and \
+            element["DevolucionSaldos"] != "None" and \
+            element["DevolucionSaldos"] != "null" and \
+            element["DevolucionSaldos"].strip().replace(",","").replace(".","").isnumeric() and \
+            element["Bono"] is not None  and \
+            element["Bono"] != "None" and \
+            element["Bono"] != "null" and \
+            element["Bono"].strip().replace(",","").replace(".","").isnumeric()):
+            if float(element["DevolucionSaldos"].strip().replace(",","").replace(".",""))  < \
+               float(element["Bono"].strip().replace(",","").replace(".","")):
+                element["validacionDetected"] = element["validacionDetected"] + "devolucion de saldo  es menor al bono,"
+        return element
+
+
+
+    @staticmethod
+    def fn_bono_sin_fecha_reden(element):
+        if (element["FechaRedencionBono"] is  None  or \
+            element["FechaRedencionBono"] == "None" or \
+            element["FechaRedencionBono"] == "null") and \
+            element["Bono"] is not None  and \
+            element["Bono"] != "None" and \
+            element["Bono"] != "null" and \
+            element["EstadoBono"] is not None  and \
+            element["EstadoBono"] != "None" and \
+            element["EstadoBono"] != "null" :
+            if str(element["EstadoBono"])  == "EMI" or  \
+               str(element["EstadoBono"])  == "RED" or  \
+               str(element["EstadoBono"])  == "CUS":
+                element["validacionDetected"] = element["validacionDetected"] + "Bono con informacion y estado EMI, RED o CUS sin fecha de rendicion,"
+        return element        
+
 table_schema_factBonos = {
-    'fields': [
+    'fields': [{
+        'name':'BonoId', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'InfPersonasId', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'InfPersonasID', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'FechaDato', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'Bono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'Tasa', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'EstadoBono', 'type':'STRING', 'mode':'NULLABLE'}, 
+        {
+        'name':'EmisorBono', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'CuponesBono', 'type':'STRING', 'mode':'NULLABLE'},                        
+        {
+        'name':'TasaRentabilidad', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'FechaRedencionBono', 'type':'STRING', 'mode':'NULLABLE'}, 
         {
         'name':'FaltanteBonoPensional', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'EstadoBonoID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'BonoFechaTraslado', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'EntidadEmisoraBonoID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'FechaTrasladoBono', 'type':'STRING', 'mode':'NULLABLE'},               
         {
         'name':'VersionBono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'CalculosActuarialesID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'SolicitudesId', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'CuponesBonoID', 'type':'STRING', 'mode':'NULLABLE'}
+        'name':'FechaLiquidacionBono', 'type':'STRING', 'mode':'NULLABLE'},                
+        {
+        'name':'CalculosActuarialesId', 'type':'STRING', 'mode':'NULLABLE'}
         ]
 }
 
 table_schema_factBonos_malos = {
     'fields': [{
-        'name':'InfPersonasId', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'BonoId', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'InfPersonasID', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'FechaDato', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'Bono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'Tasa', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'EstadoBono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'FechaRedenciónBono', 'type':'STRING', 'mode':'NULLABLE'}, 
+        'name':'EmisorBono', 'type':'STRING', 'mode':'NULLABLE'}, 
+        {
+        'name':'CuponesBono', 'type':'STRING', 'mode':'NULLABLE'},                       
+        {
+        'name':'TasaRentabilidad', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaRedencionBono', 'type':'STRING', 'mode':'NULLABLE'}, 
         {
         'name':'FaltanteBonoPensional', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'EstadoBonoID', 'type':'STRING', 'mode':'NULLABLE'},
-        {
-        'name':'EntidadEmisoraBonoID', 'type':'STRING', 'mode':'NULLABLE'},
-        {
         'name':'VersionBono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'CalculosActuarialesID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'SolicitudesId', 'type':'STRING', 'mode':'NULLABLE'},        
         {
-        'name':'CuponesBonoID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'FechaTrasladoBono', 'type':'STRING', 'mode':'NULLABLE'},        
+        {
+        'name':'BonoFechaTraslado', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaLiquidacionBono', 'type':'STRING', 'mode':'NULLABLE'},                
+        {
+        'name':'CalculosActuarialesId', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'validacionDetected', 'type':'STRING', 'mode':'NULLABLE'}
         ]
 }
 
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
-
-def fn_check_value_in(key,listValues):
-    correct = False
-    for value in listValues:
-        if element[key] == value:
-            correct = True
-            break
-    if correct == False:
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado en lista,"
-    return element
-
-def fn_check_numbers(element,key):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (element[key].isnumeric() == True):
-            pass
-        else:
-            correct = True
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son numeros,"
-    return element
+config = configparser.ConfigParser()
+config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+validador = ValidadorfactBonosLogic(config)
+options1 = PipelineOptions(
+argv= None,
+runner=config['configService']['runner'],
+project=config['configService']['project'],
+job_name='factbonos-apache-beam-job-name',
+temp_location=config['configService']['temp_location'],
+region=config['configService']['region'],
+service_account_email=config['configService']['service_account_email'],
+save_main_session= config['configService']['save_main_session'])
 
 
-def fn_check_bigger_than(element,key,valueToCompare):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if float(element[key]) < float(valueToCompare):
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es menor que "+str(valueToCompare)+","
-    return element
-
-def fn_check_text(element,key):
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (str(element[key]).replace(" ","").isalpha() == False):
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son texto,"
-    return element
-
-def fn_check_pension_less_than_50(element):
-    if element["TipoPension"].trim() == "2" or element["TipoPension"].trim() == "3":
-        if float(element["SemanasMomentoDefinicion"]) < float(50):
-            element["validacionDetected"] = element["validacionDetected"] + "persona con pension de invalidez o sobrevivencia con menos de 50 en campo total_semanas - semanasAlMomentoDeLaDefinicion,"
-    return element
+table_spec_clean = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_factBonos')
 
 
-if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+table_spec_dirty = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_factBonos_dirty') 
+
+with beam.Pipeline(options=options1) as p:
+   
+        
+        
     factBonos  = (
         p
         | 'Query Table Clientes' >> beam.io.ReadFromBigQuery(
             query='''
-                SELECT GENERATE_UUID() as BonoId, B.InfPersonasId, CURRENT_DATE() as FechaDato, fu.BONO Bono, C.FR_BONO FechaRedencionBono, C.MODALIDAD,
-                SP.TASA Tasa, 'None' FaltanteBonoPensional, EstadoBonoID, EntidadEmisoraBonoID , SC.VERSION_CUPON VersionBono,
-                'None' CalculosActuarialesID, ZZZ.CuponesBonoID, Atributo
-                FROM
-                afiliados-pensionados-prote.afiliados_pensionados.FuturaPen C
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimPensionados PEN
-                ON
-                C.idAfiliado=PEN.DocumentoDeLaPersona
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimBeneficiarios BEN
-                ON
-                BEN.IdentificacionAfiliado=PEN.DocumentoDeLaPersona
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimInfPersonas B
-                ON
-                B.PensionadosId=PEN.PensionadosID AND B.BeneficiariosId=BEN.BeneficiariosID
-                LEFT JOIN
-                (SELECT BONO, idAfiliado, 'Pensionados' as Atributo FROM afiliados-pensionados-prote.afiliados_pensionados.FuturaPen
-                UNION ALL
-                (SELECT BONO, idAfiliado, 'Retiros' as Atributo FROM afiliados-pensionados-prote.afiliados_pensionados.tabla_fed_retiros_futura a
-                LEFT JOIN
-                notional-radio-302217.DatalakeAnalitica.SQLSERVER_BIPROTECCIONDW_DW_DIMAFILIADOS_Z51 b
-                on
-                a.afi_hash64=b.afi_hash64)
-                )fu
-                ON
-                fu.idAfiliado=C.idAfiliado
-                LEFT JOIN
-                afiliados-pensionados-prote.afiliados_pensionados.SUPERCUPON SC
-                on
-                SC.IDENTIFICACION=C.idAfiliado
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimEstadoCupon ft
-                ON
-                ft.EstadoCupon=SC.ESTADO_CUPON
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimCuponBono ZZZ
-                ON
-                ZZZ.EstadoCuponID=ft.EstadoCuponID
-                LEFT JOIN
-                (
-                SELECT TASA,idAfiliado,idEmpleador,bones4 FROM
-                afiliados-pensionados-prote.afiliados_pensionados.SUPERBONO2
-                
-                ) SP
-                ON
-                SP.idAfiliado=C.idAfiliado
-                left join
-                afiliados-pensionados-prote.Datamart.dimEntidadEmisorBono gg
-                on
-                gg.IdEntidadEmisora=SP.idEmpleador
-                left join
-                afiliados-pensionados-prote.Datamart.dimEstadoBono ggp
-                on
-                ggp.EstadoBono=SP.bones4
+                            WITH Bonos AS (SELECT penret.AFI_HASH64,
+                            GENERATE_UUID() AS BonoId,
+                            'None' as Inf_PersonasId,
+                            CURRENT_DATE() AS FechaDato,
+                            BONO as Bono,
+                            TASA AS TasaRentabilidad,
+                            FR_BONO AS FechaRedencionBono,
+                            'None' AS FaltanteBonoPensional, -- de donde se saca este dato?
+                            ESTADO_CUPON EstadoBono,
+                            '' EmisorBono,
+                            VERSION_BONO as VersionBono,
+                            '' CalculosActuarialesId,
+                            CONSECUTIVO_CUPON CuponesBono,
+                            '' SolicitudesId,
+                            'None' BonoFechaTraslado, -- de donde se saca este dato?
+                            'None' FechaTrasladoBono, -- de donde se saca este dato?
+                            'None' FechaLiquidacionBono -- de donde se saca este dato?
+                            FROM `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_SUPERBONO2` supb
+                            LEFT JOIN 
+                            (SELECT DISTINCT AFI_HASH64, BONO, cast(FR_BONO as string) FR_BONO  FROM
+                            `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_pensionadosFutura`
+                            UNION DISTINCT
+                            SELECT DISTINCT AFI_HASH64, BONO, 'None' FR_BONO FROM
+                            `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_Retiros`
+                            ) penret
+                            ON
+                            supb.AFI_HASH64=penret.AFI_HASH64
+                            LEFT JOIN
+                            '''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_SUPERCUPON cup
+                            ON
+                            cup.AFI_HASH64=penret.AFI_HASH64)
+
+                            ,EMISOR AS 
+                            (SELECT TipoIdEntidadEmisora, IdEntidadEmisora, EMP_HASH64, AFI_HASH64
+                            FROM (
+                            SELECT DISTINCT TipoIdEntidadEmisora, IdEntidadEmisora, ENTIDAD.EMP_HASH64, AFI_HASH64 
+                            FROM 
+                            (SELECT EZ51.tipoIdEmpleador TipoIdEntidadEmisora, EZ51.idEmpleador IdEntidadEmisora, E.EMP_HASH64
+                            FROM '''+config['configService']['datasetDatalake']+'''.AS400_FPOBLIDA_ENTAR9 E INNER JOIN
+                            '''+config['configService']['datasetDatalake']+'''.SQLSERVER_BIPROTECCIONDW_DW_DIMEMPLEADORES_Z51 EZ51
+                            ON E.EMP_HASH64=EZ51.EMP_HASH64) ENTIDAD
+
+                            LEFT JOIN 
+                            '''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_SUPERBONO2 SB
+                            ON 
+                            ENTIDAD.EMP_HASH64=SB.EMP_HASH64)
+                            ), info as (
+
+                            ((SELECT InfPersonasID, dpen.AFI_HASH64 FROM 
+                            `'''+config['configService']['Datamart']+'''.DATAMART_PENSIONADOS_dimInfPersonas` inf
+                            LEFT JOIN 
+                            (SELECT DISTINCT AFI_HASH64,PensionadosID 
+                            FROM 
+                            '''+config['configService']['Datamart']+'''.DATAMART_PENSIONADOS_dimPensionados
+                            ) dpen
+                            ON 
+                            dpen.PensionadosID=inf.PensionadosID)
+
+                            UNION DISTINCT 
+
+                            (
+                            SELECT InfPersonasID, dben.AFI_HASH64 FROM 
+                            `'''+config['configService']['Datamart']+'''.DATAMART_PENSIONADOS_dimInfPersonas` inf
+                            LEFT JOIN
+                            (SELECT DISTINCT AFI_HASH64, BeneficiariosID 
+                            from '''+config['configService']['Datamart']+'''.DATAMART_PENSIONADOS_dimBeneficiarios
+                            ) dben
+                            ON 
+                            dben.BeneficiariosId=inf.BeneficiariosId
+                            )
+                            )
+                            )
+                            SELECT BonoId, info.InfPersonasID, bonos.FechaDato, Bono, TasaRentabilidad, FechaRedencionBono, FaltanteBonoPensional,
+                            EstadoBono,IdEntidadEmisora as EmisorBono, VersionBono, CalculosActuarialesId,
+                            CuponesBono, soli.SolicitudesId, BonoFechaTraslado, FechaTrasladoBono, FechaLiquidacionBono
+                            FROM Bonos
+                            LEFT JOIN 
+                            EMISOR
+                            ON 
+                            CAST(Bonos.AFI_HASH64 AS STRING) = CAST(EMISOR.AFI_HASH64 AS STRING)
+                            LEFT JOIN 
+                            info
+                            ON
+                            info.AFI_HASH64=Bonos.AFI_HASH64
+                            LEFT JOIN 
+                            '''+config['configService']['Datamart']+'''.DATAMART_PENSIONADOS_factSolicitudes soli
+                            ON
+                            info.InfPersonasID=soli.InfPersonasID
+
+
                 ''',\
             use_standard_sql=True))
 
+                                            # 'CAI':str(x['CAI']),\}
+                                            # 'DevolucionSaldos':str(x['DevolucionSaldos']),\
 
-    factBonos_Dict = factBonos | beam.Map(lambda x: {'InfPersonasId':str(x['InfPersonasId']),\
+    factBonos_Dict = factBonos | beam.Map(lambda x: {'BonoId':str(x['InfPersonasID']),\
+                                                            'InfPersonasID':str(x['InfPersonasID']),\
                                                             'FechaDato':str(x['FechaDato']),\
                                                             'Bono':str(x['Bono']),\
-                                                            'Tasa':str(x['Tasa']),\
+                                                            'TasaRentabilidad':str(x['TasaRentabilidad']),\
+                                                            'EstadoBono':str(x['EstadoBono']),\
+                                                            'EmisorBono':str(x['EmisorBono']),\
+                                                            'SolicitudesId':str(x['SolicitudesId']),\
+                                                            'FechaTrasladoBono':str(x['FechaTrasladoBono']),\
+                                                            'BonoFechaTraslado':str(x['BonoFechaTraslado']),\
                                                             'FechaRedencionBono':str(x['FechaRedencionBono']),\
                                                             'FaltanteBonoPensional':str(x['FaltanteBonoPensional']),\
-                                                            'EstadoBonoID':str(x['EstadoBonoID']),\
-                                                            'EntidadEmisoraBonoID':str(x['EntidadEmisoraBonoID']),\
+                                                            'FechaLiquidacionBono':str(x['FechaLiquidacionBono']),\
                                                             'VersionBono':str(x['VersionBono']),\
-                                                            'CalculosActuarialesID':str(x['CalculosActuarialesID']),\
-                                                            'CuponesBonoID':str(x['CuponesBonoID']),\
+                                                            'CalculosActuarialesId':str(x['CalculosActuarialesId']),\
                                                             'validacionDetected':""})
 
 
-    InfPersonasId_fullness_validated = factBonos_Dict | 'completitud InfPersonasId' >> beam.Map(fn_check_completitud,    'InfPersonasId' )
+    InfPersonasID_fullness_validated = factBonos_Dict | 'completitud InfPersonasID' >> beam.Map(validador.fn_check_completitud,    'InfPersonasID' )
 
-    FechaDato_fullness_validated = InfPersonasId_fullness_validated | 'completitud FechaDato' >> beam.Map(fn_check_completitud,    'FechaDato' )
+    FechaDato_fullness_validated = InfPersonasID_fullness_validated | 'completitud FechaDato' >> beam.Map(validador.fn_check_completitud,    'FechaDato' )
 
-    Tasa_fullness_validated = FechaDato_fullness_validated | 'completitud Tasa' >> beam.Map(fn_check_completitud,    'Tasa' )
+    TasaRentabilidad_fullness_validated = FechaDato_fullness_validated | 'completitud TasaRentabilidad' >> beam.Map(validador.fn_check_completitud,    'TasaRentabilidad' )
 
-    FechaRedencionBono_fullness_validated = Tasa_fullness_validated | 'completitud FechaRedencionBono' >> beam.Map(fn_check_completitud,    'FechaRedencionBono' )
+    FechaRedencionBono_fullness_validated = TasaRentabilidad_fullness_validated | 'completitud FechaRedencionBono' >> beam.Map(validador.fn_check_completitud,    'FechaRedencionBono' )
 
-    FaltanteBonoPensional_fullness_validated = FechaRedencionBono_fullness_validated | 'completitud FaltanteBonoPensional' >> beam.Map(fn_check_completitud,    'FaltanteBonoPensional' )
+    Bono_fullness_validated = FechaRedencionBono_fullness_validated | 'completitud Bono' >> beam.Map(validador.fn_check_completitud,    'Bono' )
 
-    EstadoBonoID_fullness_validated = FaltanteBonoPensional_fullness_validated | 'completitud EstadoBonoID' >> beam.Map(fn_check_completitud,    'EstadoBonoID' )
+    FaltanteBonoPensional_fullness_validated = Bono_fullness_validated | 'completitud FaltanteBonoPensional' >> beam.Map(validador.fn_check_completitud,    'FaltanteBonoPensional' )
 
-    EntidadEmisoraBonoID_fullness_validated = EstadoBonoID_fullness_validated | 'completitud EntidadEmisoraBonoID' >> beam.Map(fn_check_completitud,    'EntidadEmisoraBonoID' )
+    VersionBono_fullness_validated = FaltanteBonoPensional_fullness_validated | 'completitud VersionBono' >> beam.Map(validador.fn_check_completitud,    'VersionBono' )
 
-    VersionBono_fullness_validated = EntidadEmisoraBonoID_fullness_validated | 'completitud VersionBono' >> beam.Map(fn_check_completitud,    'VersionBono' )
+    CalculosActuarialesId_fullness_validated = VersionBono_fullness_validated | 'completitud CalculosActuarialesId' >> beam.Map(validador.fn_check_completitud,    'CalculosActuarialesId' )
 
-    CalculosActuarialesID_fullness_validated = VersionBono_fullness_validated | 'completitud CalculosActuarialesID' >> beam.Map(fn_check_completitud,    'CalculosActuarialesID' )
+    # DevolucionSaldos_biggerThan_Bono = CalculosActuarialesId_fullness_validated  | 'DevolucionSaldos CuponesBonoID' >> beam.Map(validador.fn_check_bigger_than_other, 'Bono','DevolucionSaldos')
 
-    CuponesBonoID_fullness_validated = CalculosActuarialesID_fullness_validated | 'completitud CuponesBonoID' >> beam.Map(fn_check_completitud,    'CuponesBonoID' )
+    # DevolucionSaldos_lesserThan_combined = DevolucionSaldos_biggerThan_Bono  | 'DevolucionSaldos less than Bono and saldo CAI' >> beam.Map(validador.fn_devoSaldo_lesser_than)
 
+    # DevolucionSaldos_lesserThan_bono = DevolucionSaldos_lesserThan_combined    | 'DevolucionSaldos less than Bono' >> beam.Map(validador.fn_devoSaldo_lesser_than_bono)
 
+    bonoSinFechaRedencion_validation = CalculosActuarialesId_fullness_validated    | 'Bono estado EMI, RED o CUS sin fecha de rendicion' >> beam.Map(validador.fn_bono_sin_fecha_reden)
 
-#     Sexo_MoF_validated = Sexo_text_validated | 'sexo en valores' >> beam.Map( fn_check_value_in_bene('Sexo',["M","F"]))
-
-
-
-#     FechaNacimiento_fullness_validated = Nombre_fullness_validated | 'completitud FechaNacimiento' >> beam.Map(fn_check_completitud('FechaNacimiento'))
-
-#     FechaNacimiento_biggerThan120_validated = FechaNacimiento_fullness_validated | 'nas de 120 annos FechaNacimiento' >> beam.Map( fn_age_less_120('FechaNacimiento'))
+    results = bonoSinFechaRedencion_validation | beam.ParDo(fn_divide_clean_dirty()).with_outputs()
 
 
-#     IdentificacionPension_fullness_validated = FechaNacimiento_biggerThan120_validated | 'completitud IdentificacionPension' >> beam.Map( fn_check_completitud_bene('IdentificacionPension'))
-
-#     IdentificacionPension_numbers_validated = IdentificacionPension_fullness_validated | 'numeros IdentificacionPension' >> beam.Map( fn_check_numbers('IdentificacionPension'))
-
-#     estadoBeneficiario_fullness_validated = IdentificacionPension_numbers_validated | 'completitud estadoBeneficiario' >> beam.Map( fn_check_completitud_bene('estadoBeneficiario'))
-
-#     estadoBeneficiario_text_validated = estadoBeneficiario_fullness_validated | 'solo texto estadoBeneficiario' >> beam.Map( fn_check_text('estadoBeneficiario'))
-
-#     estadoBeneficiario_IoS_validated = Sexo_text_validated | 'estadoBeneficiario en valores' >> beam.Map( fn_check_value_in_bene('estadoBeneficiario',["I","S"]))
-
-#     calidadBeneficiario_completitud_validated = Sexo_text_validated | 'calidadBeneficiario completitud' >> beam.Map( fn_check_completitud_bene('calidadBeneficiario'))
-
-#     TipoBeneficiario_completitud_validated = Sexo_text_validated | 'TipoBeneficiario completitud' >> beam.Map( fn_check_completitud_bene('TipoBeneficiario'))
-
-#     SubtipoBeneficiario_completitud_validated = Sexo_text_validated | 'SubtipoBeneficiario completitud' >> beam.Map( fn_check_completitud_bene('SubtipoBeneficiario'))
-
-#     ParentescoBeneficiario_completitud_validated = Sexo_text_validated | 'ParentescoBeneficiario completitud' >> beam.Map( fn_check_completitud_bene('ParentescoBeneficiario'))
-
-#     ParentescoBeneficiario_text_validated = ParentescoBeneficiario_completitud_validated | 'ParentescoBeneficiario texto' >> beam.Map( fn_check_text('ParentescoBeneficiario'))
-    
-
-
-
-#    #  regla 22 
-
-#    BeneficiarioMenorAfiliado_text_validated = ParentescoBeneficiario_text_validated | 'Beneficiario menor a afiliado' >> beam.Map( fn_bene_younger_cliient())
-
-#    BeneficiarioMayorAfiliado_text_validated = BeneficiarioMenorAfiliado_text_validated | 'Beneficiario mayor a afiliado' >> beam.Map( fn_bene_older_cliient())
-
-#     #  regla 30
-
-#    numeroRepeticiones_text_validated = BeneficiarioMayorAfiliado_text_validated | 'dos o mas Beneficiarios con misma Id' >> beam.Map( fn_repetead_id("numeroRepeticiones",1))
-
-#    nombreBene_text_validated = numeroRepeticiones_text_validated | 'nombre o apellido de mas de dos caracteres' >> beam.Map( fn_bene_short_name("Nombre",1))
-
-#    EstadoAfiliadoFutura_EstadoAfiliadoApolo_match = nombreBene_text_validated | 'match entre EstadoAfiliadoFutura y EstadoAfiliadoApolo' >> beam.Map( fn_fimd_no_mathcing("EstadoAfiliadoFutura","EstadoAfiliadoApolo"))
-
-    results = CuponesBonoID_fullness_validated | beam.ParDo(fn_divide_clean_dirty()).with_outputs()
-
-
-    limpias = results["Clean"] | beam.Map(lambda x:         {'InfPersonasID':str(x['InfPersonasID']),\
+    limpias = results['Clean'] | beam.Map(lambda x:         {'BonoId':str(x['InfPersonasID']),\
+                                                            'InfPersonasID':str(x['InfPersonasID']),\
                                                             'FechaDato':str(x['FechaDato']),\
                                                             'Bono':str(x['Bono']),\
-                                                            'Tasa':str(x['Tasa']),\
+                                                            'EstadoBono':str(x['EstadoBono']),\
+                                                            'EmisorBono':str(x['EmisorBono']),\
+                                                            'SolicitudesId':str(x['SolicitudesId']),\
+                                                            'TasaRentabilidad':str(x['TasaRentabilidad']),\
+                                                            'FechaTrasladoBono':str(x['FechaTrasladoBono']),\
+                                                            'BonoFechaTraslado':str(x['BonoFechaTraslado']),\
                                                             'FechaRedencionBono':str(x['FechaRedencionBono']),\
                                                             'FaltanteBonoPensional':str(x['FaltanteBonoPensional']),\
-                                                            'EstadoBonoID':str(x['EstadoBonoID']),\
-                                                            'EntidadEmisoraBonoID':str(x['EntidadEmisoraBonoID']),\
-                                                            'VersionBono':str(x['FechaRedenciVersionBonoonBono']),\
-                                                            'CalculosActuarialesID':str(x['CalculosActuarialesID']),\
-                                                            'CuponesBonoID':str(x['CuponesBonoID'])})
+                                                            'FechaLiquidacionBono':str(x['FechaLiquidacionBono']),\
+                                                            'VersionBono':str(x['VersionBono']),\
+                                                            'CalculosActuarialesId':str(x['CalculosActuarialesId'])})
+
+
+
+    validadas = results['validationsDetected'] | beam.Map(lambda x:         {'BonoId':str(x['InfPersonasID']),\
+                                                            'InfPersonasID':str(x['InfPersonasID']),\
+                                                            'FechaDato':str(x['FechaDato']),\
+                                                            'Bono':str(x['Bono']),\
+                                                            'EstadoBono':str(x['EstadoBono']),\
+                                                            'EmisorBono':str(x['EmisorBono']),\
+                                                            'SolicitudesId':str(x['SolicitudesId']),\
+                                                            'TasaRentabilidad':str(x['TasaRentabilidad']),\
+                                                            'FechaTrasladoBono':str(x['FechaTrasladoBono']),\
+                                                            'BonoFechaTraslado':str(x['BonoFechaTraslado']),\
+                                                            'FechaRedencionBono':str(x['FechaRedencionBono']),\
+                                                            'FaltanteBonoPensional':str(x['FaltanteBonoPensional']),\
+                                                            'FechaLiquidacionBono':str(x['FechaLiquidacionBono']),\
+                                                            'VersionBono':str(x['VersionBono']),\
+                                                            'CalculosActuarialesId':str(x['CalculosActuarialesId']),\
+                                                            'validacionDetected':str(x['validacionDetected'])})
 
 
     # validadas = results["validationsDetected"] | beam.Map(lambda x: \
@@ -349,7 +429,7 @@ if __name__ == "__main__":
 
 
 
-    results["validationsDetected"] | "write validated ones" >> beam.io.WriteToBigQuery(
+    validadas | "write validated ones" >> beam.io.WriteToBigQuery(
             table_spec_dirty,
             schema=table_schema_factBonos_malos,
             write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
@@ -362,5 +442,5 @@ if __name__ == "__main__":
             write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
             create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED)
             
-    result = p.run()
-    result.wait_until_finish()
+
+

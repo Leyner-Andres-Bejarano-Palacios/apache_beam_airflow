@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 
-import uuid
+
+
+
+
 import time
+import uuid
 import types
 import threading
 import numpy as np
 import pandas as pd
+import configparser
+from datetime import date
 import apache_beam as beam
+from datetime import datetime
 from apache_beam import pvalue
+from google.cloud import bigquery as bq
 from apache_beam.runners.runner import PipelineState
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -15,42 +23,85 @@ from apache_beam.options.pipeline_options import PipelineOptions
 
 
 
+class fn_divide_clean_dirty(beam.DoFn):
+    def process(self, element):
+        correct = False
+        if element["validacionDetected"] == "":
+            correct = True
+            del element["validacionDetected"]
 
-options1 = PipelineOptions(
-    argv= None,
-    runner='DataflowRunner',
-    project='afiliados-pensionados-prote',
-    job_name='factdefiniciones-apache-beam-job-name',
-    temp_location='gs://bkt_prueba/temp',
-    region='us-central1',
-    service_account_email='composer@afiliados-pensionados-prote.iam.gserviceaccount.com',
-    save_main_session= 'True')
-
-
-table_spec_clean = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='factDefiniciones')
+        if correct == True:
+            yield pvalue.TaggedOutput('Clean', element)
+        else:
+            yield pvalue.TaggedOutput('validationsDetected', element)
 
 
-table_spec_dirty = bigquery.TableReference(
-    projectId='afiliados-pensionados-prote',
-    datasetId='Datamart',
-    tableId='factDefiniciones_dirty')
+class ValidadorfactDefinicionesLogic():
+    def __init__(self, config):
+        self._vName = self.__class__.__name__
+        self._vConfig = config
+
+    @staticmethod
+    def fn_check_completitud(element,key):
+        if (element[key] is None  or str(element[key]).lower() == "none" or (element[key]).lower() == "null" or str(element[key]).replace(" ","") == ""):
+            element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
+        return element
 
 
+    @staticmethod
+    def fn_check_bigger_than(element,key,valueToCompare):
+        if (element[key] is not None  and\
+            element[key] != "None" and\
+            element[key] != "null") and\
+            str(element[key]).replace(" ","") != ""  and\
+            element[key].strip().replace(",","").replace(".","").isnumeric():
+            correct = False
+            if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
+                if float(element[key]) < float(valueToCompare):
+                    element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es menor que "+str(valueToCompare)+","
+        return element        
+
+
+    @staticmethod
+    def fn_check_lesser_than(element,key,valueToCompare):
+        if (element[key] is not None  and \
+            element[key] != "None" and \
+            element[key] != "null"):
+            if  float(str(element[key]).strip().replace(",","").replace(".","")) > \
+                float(str(valueToCompare).strip().replace(",","").replace(".","")):
+                element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es mayor que "+str(valueToCompare)+","
+        return element
+
+
+
+
+    @staticmethod
+    def fn_check_pension_less_than_50(element):
+        if (element["TipoPension"] != "None" and \
+            element["TipoPension"] != "null" and \
+            element["TipoPension"] is not None and \
+            element["SemanasMomentoDefinicion"] != "None" and \
+            element["SemanasMomentoDefinicion"] != "null" and \
+            str(element["SemanasMomentoDefinicion"]).strip().replace(",","").replace(".","").isnumeric() and \
+            element["SemanasMomentoDefinicion"] is not None):
+            if element["TipoPension"].strip() == "2" or element["TipoPension"].strip() == "3":
+                if float(element["SemanasMomentoDefinicion"].strip().replace(",","").replace(".","")) < float(50):
+                    element["validacionDetected"] = element["validacionDetected"] + "persona con pension de invalidez o sobrevivencia con menos de 50 en campo total_semanas - semanasAlMomentoDeLaDefinicion,"
+        return element
 
 
 table_schema_factDefiniciones = {
     'fields': [
         {
-        'name':'InfPersonasID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'DefinicionesID', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'TiempoID', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaDato', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'Inf_personasID', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'TipoPensionID', 'type':'STRING', 'mode':'NULLABLE'},
-        {
-        'name':'TipoPension', 'type':'STRING', 'mode':'NULLABLE'},
-        {
-        'name':'FechaModificacion', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'SemanasMomentoDefinicion', 'type':'STRING', 'mode':'NULLABLE'},
         {
@@ -60,20 +111,26 @@ table_schema_factDefiniciones = {
         {
         'name':'SemanasBono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'modalidadPension', 'type':'STRING', 'mode':'NULLABLE'}
+        'name':'IBLUltimosDiezAnnos', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'IBLTodaLaVida', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaDefinicion', 'type':'STRING', 'mode':'NULLABLE'}
         ]
 }
 
 table_schema_factDefiniciones_malos = {
     'fields': [
         {
-        'name':'InfPersonasID', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'DefinicionesID', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'TiempoID', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaDato', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'Inf_personasID', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'TipoPensionID', 'type':'STRING', 'mode':'NULLABLE'},
-        {
-        'name':'TipoPension', 'type':'STRING', 'mode':'NULLABLE'},
-        {
-        'name':'FechaModificacion', 'type':'STRING', 'mode':'NULLABLE'},
         {
         'name':'SemanasMomentoDefinicion', 'type':'STRING', 'mode':'NULLABLE'},
         {
@@ -83,136 +140,58 @@ table_schema_factDefiniciones_malos = {
         {
         'name':'SemanasBono', 'type':'STRING', 'mode':'NULLABLE'},
         {
-        'name':'modalidadPension', 'type':'STRING', 'mode':'NULLABLE'},
+        'name':'IBLUltimosDiezAnnos', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'IBLTodaLaVida', 'type':'STRING', 'mode':'NULLABLE'},
+        {
+        'name':'FechaDefinicion', 'type':'STRING', 'mode':'NULLABLE'},        
         {
         'name':'validacionDetected', 'type':'STRING', 'mode':'NULLABLE'}
         ]
 }
 
 
-class fn_divide_clean_dirty(beam.DoFn):
-  def process(self, element):
-    correct = False
-    if element["validacionDetected"] == "":
-        correct = True
-        del element["validacionDetected"]
-
-    if correct == True:
-        yield pvalue.TaggedOutput('Clean', element)
-    else:
-        yield pvalue.TaggedOutput('validationsDetected', element)
-
-
-
-
-def fn_check_completitud(element,key):
-    if (element[key] is None  or element[key] == "None" or element[key] == "null"):
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado,"
-    return element
-
-def fn_check_value_in(key,listValues):
-    correct = False
-    for value in listValues:
-        if element[key] == value:
-            correct = True
-            break
-    if correct == False:
-        element["validacionDetected"] = element["validacionDetected"] + "valor "+ str(key) +" no encontrado en lista,"
-    return element
-
-def fn_check_numbers(element,key):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (element[key].isnumeric() == True):
-            pass
-        else:
-            correct = True
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son numeros,"
-    return element
+config = configparser.ConfigParser()
+config.read('/home/airflow/gcs/data/repo/configs/config.ini')
+validador = ValidadorfactDefinicionesLogic(config)
+options1 = PipelineOptions(
+argv= None,
+runner=config['configService']['runner'],
+project=config['configService']['project'],
+job_name='factdefiniciones-apache-beam-job-name',
+temp_location=config['configService']['temp_location'],
+region=config['configService']['region'],
+service_account_email=config['configService']['service_account_email'],
+save_main_session= config['configService']['save_main_session'])
 
 
-def fn_check_bigger_than(element,key,valueToCompare):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if element[key].isnumeric():
-            if float(element[key]) < float(valueToCompare):
-                element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es menor que "+str(valueToCompare)+","
-        else:
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no es numerico,"
-    return element
+table_spec_clean = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_factDefiniciones')
 
 
-def fn_check_smaller_than(element,key,valueToCompare):
-    correct = False
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if element[key].isnumeric():
-            if float(element[key]) > float(valueToCompare):
-                element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" es menor que "+str(valueToCompare)+","
-        else:
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no es numerico,"
-    return element
+table_spec_dirty = bigquery.TableReference(
+    projectId=config['configService']['project'],
+    datasetId='Datamart',
+    tableId='DATAMART_PENSIONADOS_factDefiniciones_dirty')
 
-def fn_check_text(element,key):
-    if (element[key] is not None) and (str(element[key]) != "null") and (element[key] != "None"):
-        if (str(element[key]).replace(" ","").isalpha() == False):
-            element["validacionDetected"] = element["validacionDetected"] + "valor en "+ str(key) +" no son texto,"
-    return element
-
-def fn_check_pension_less_than_50(element):
-    if (element["TipoPension"] != "None" and \
-        element["SemanasMomentoDefinicion"] != "None" and \
-        str(element["SemanasMomentoDefinicion"]).strip().isnumeric() and \
-        element["SemanasMomentoDefinicion"] is not None):
-        if element["TipoPension"].strip() == "2" or element["TipoPension"].strip() == "3":
-            if float(element["SemanasMomentoDefinicion"]) < float(50):
-                element["validacionDetected"] = element["validacionDetected"] + "persona con pension de invalidez o sobrevivencia con menos de 50 en campo total_semanas - semanasAlMomentoDeLaDefinicion,"
-    return element
-
-
-if __name__ == "__main__":
-    p = beam.Pipeline(options=options1)
+with beam.Pipeline(options=options1) as p:     
+        
     factDefiniciones  = (
         p
         | 'Query Table Clientes' >> beam.io.ReadFromBigQuery(
             query='''
-                -- // se nos pide ingestar semanas_afp, tomar este campo de semanas_otras_afp (ignorar )
-
-                -- // lo mismo con semanas protecion, y no traiga el IBL (niguno de los dos)
-
-                -- // semanas bono tampoco lo tome (ninguno de los dos)
-
-                -- // semanasAlMomento de definicion (validarlo con Nataly y Juan David, lo mas probable es que sea total_semanas) '-----> si es lo mismo
-
-                SELECT c.InfPersonasID, b.TipoPensionID, b.TipoPension, CURRENT_DATE() as /*Validar si es fecha del dato*/ FechaModificacion, TOTAL_SEMANAS as /*Validar si es TOTAL_SEMANAS*/ SemanasMomentoDefinicion, SEMANAS_PROTECCION as SemanasProteccion, a.SEMANAS_OTRAS_AFP /*Validar si es SEMANAS_OTRAS_AFP o SEMANAS_OTRAS_AFP_FECHA_SINIESTRO*/ as SemanasAFP, a.SEMANAS_BONO1 as /*Validar si es SEMANAS_BONO1 o SEMANAS_BONO2*/ SemanasBono,
-                pen.MODALIDAD modalidadPension
-                FROM
-                afiliados-pensionados-prote.afiliados_pensionados.tabla_fed_Advance a
-                LEFT JOIN
-                (SELECT DISTINCT idAfiliado, TIPO_PENSION,MODALIDAD FROM
-                afiliados-pensionados-prote.afiliados_pensionados.PenFutura pen
-                ) pen
-                ON
-                pen.idAfiliado=a.idAfiliado
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimTipoPension b
-                ON
-                b.TipoPension=pen.TIPO_PENSION
-                LEFT JOIN
-                (select distinct ben.IdentificacionAfiliado FROM
-                afiliados-pensionados-prote.Datamart.dimBeneficiarios ben
-                ) ben
-                ON
-                ben.IdentificacionAfiliado=pen.idAfiliado
-                LEFT JOIN
-                (select distinct DocumentoDeLaPersona, PensionadosID from
-                afiliados-pensionados-prote.Datamart.dimPensionados m
-                ) m
-                ON
-                pen.idAfiliado=m.DocumentoDeLaPersona
-                LEFT JOIN
-                afiliados-pensionados-prote.Datamart.dimInfPersonas c
-                ON
-                c.PensionadosId = m.PensionadosID
+                        SELECT GENERATE_UUID() AS DefinicionesID, 'None' as TiempoID, CURRENT_DATE() AS FechaDato, 
+                        'None' as Inf_personasID, 'None' as TipoPensionID,
+                        TOTAL_SEMANAS AS SemanasMomentoDefinicion,
+                        SEMANAS_PROTECCION as SemanasProteccion,
+                        SEMANAS_OTRAS_AFP as SemanasAFP,
+                        SEMANAS_BONO1 AS SemanasBono,
+                        IBL1 IBLUltimosDiezAnnos,
+                        IBL2 IBLTodaLaVida,
+                        FECHA_CORTE_IBL1 as FechaDefinicion
+                        FROM `'''+config['configService']['Datawarehouse']+'''.DATAMART_PENSIONADOS_Advance`
                                 ''',\
             use_standard_sql=True))
 
@@ -222,34 +201,35 @@ if __name__ == "__main__":
 
 
     factDefiniciones_Dict = factDefiniciones | beam.Map(lambda x: \
-                                                            {'InfPersonasID':str(x['InfPersonasID']),\
+                                                            {'DefinicionesID':str(x['DefinicionesID']),\
+                                                            'TiempoID':str(x['TiempoID']),\
+                                                            'FechaDato':str(x['FechaDato']),\
+                                                            'Inf_personasID':str(x['Inf_personasID']),\
                                                             'TipoPensionID':str(x['TipoPensionID']),\
-                                                            'TipoPension':str(x['TipoPension']),\
                                                             'SemanasMomentoDefinicion':str(x['SemanasMomentoDefinicion']),\
                                                             'SemanasProteccion':str(x['SemanasProteccion']),\
                                                             'SemanasAFP':str(x['SemanasAFP']),\
                                                             'SemanasBono':str(x['SemanasBono']),\
-                                                            'modalidadPension':str(x['modalidadPension']),\
+                                                            'IBLUltimosDiezAnnos':str(x['IBLUltimosDiezAnnos']),\
+                                                            'IBLTodaLaVida':str(x['IBLTodaLaVida']),\
+                                                            'FechaDefinicion':str(x['FechaDefinicion']),\
                                                             'validacionDetected':""})
 
 
-    InfPersonasID_fullness_validated = factDefiniciones_Dict | 'completitud InfPersonasID' >> beam.Map(fn_check_completitud,    'InfPersonasID' )
 
-    TipoPensionID_fullness_validated = InfPersonasID_fullness_validated | 'completitud TipoPensionID' >> beam.Map(fn_check_completitud,    'TipoPensionID' )
+    SemanasMomentoDefinicion_fullness_validated = factDefiniciones_Dict | 'completitud SemanasMomentoDefinicion' >> beam.Map(validador.fn_check_completitud,    'SemanasMomentoDefinicion' )
 
-    SemanasMomentoDefinicion_fullness_validated = TipoPensionID_fullness_validated | 'completitud SemanasMomentoDefinicion' >> beam.Map(fn_check_completitud,    'SemanasMomentoDefinicion' )
+    SemanasMomentoDefinicion_biggerThan_validated = SemanasMomentoDefinicion_fullness_validated | 'bigger than SemanasMomentoDefinicion' >> beam.Map(validador.fn_check_bigger_than,    'SemanasMomentoDefinicion',0 )
 
-    SemanasMomentoDefinicion_biggerThan_validated = SemanasMomentoDefinicion_fullness_validated | 'bigger than SemanasMomentoDefinicion' >> beam.Map(fn_check_bigger_than,    'SemanasMomentoDefinicion',0 )
+    SemanasMomentoDefinicion_QualityRule_58 = SemanasMomentoDefinicion_biggerThan_validated | 'smaller than SemanasMomentoDefinicion' >> beam.Map(validador.fn_check_lesser_than,    'SemanasMomentoDefinicion',1150 )  
 
-    SemanasMomentoDefinicion_QualityRule_58 = SemanasMomentoDefinicion_biggerThan_validated | 'smaller than SemanasMomentoDefinicion' >> beam.Map(fn_check_smaller_than,    'SemanasMomentoDefinicion',1150 )  
+    SemanasBono_validated = SemanasMomentoDefinicion_QualityRule_58 | 'completitud SemanasBono' >> beam.Map(validador.fn_check_completitud,    'SemanasBono' )
 
-    SemanasBono_validated = SemanasMomentoDefinicion_QualityRule_58 | 'completitud SemanasBono' >> beam.Map(fn_check_completitud,    'SemanasBono' )
+    SemanasAFP_validated = SemanasBono_validated | 'completitud SemanasAFP' >> beam.Map(validador.fn_check_completitud,    'SemanasAFP' )
 
-    SemanasAFP_validated = SemanasBono_validated | 'completitud SemanasAFP' >> beam.Map(fn_check_completitud,    'SemanasAFP' )
+    SemanasProteccion_validated = SemanasAFP_validated | 'completitud SemanasProteccion' >> beam.Map(validador.fn_check_completitud,    'SemanasProteccion' )
 
-    SemanasProteccion_validated = SemanasAFP_validated | 'completitud SemanasProteccion' >> beam.Map(fn_check_completitud,    'SemanasProteccion' )
-
-    SemanasMomentoDefinicio_QualityRule_19 = SemanasProteccion_validated | 'pension invalidez or survivor with less than 50 total weeks' >> beam.Map(fn_check_pension_less_than_50) 
+    #****************** SemanasMomentoDefinicio_QualityRule_19 = SemanasProteccion_validated | 'pension invalidez or survivor with less than 50 total weeks' >> beam.Map(validador.fn_check_pension_less_than_50) 
 
     
 
@@ -317,32 +297,40 @@ if __name__ == "__main__":
 
 
 
-    results = SemanasMomentoDefinicio_QualityRule_19 | beam.ParDo(fn_divide_clean_dirty()).with_outputs()
+    results = SemanasProteccion_validated | beam.ParDo(fn_divide_clean_dirty()).with_outputs()
 
 
     limpias = results["Clean"] | beam.Map(lambda x: \
-                                                            {'InfPersonasID':str(x['InfPersonasID']),\
+                                                            {'DefinicionesID':str(x['DefinicionesID']),\
+                                                            'TiempoID':str(x['TiempoID']),\
+                                                            'FechaDato':str(x['FechaDato']),\
+                                                            'Inf_personasID':str(x['Inf_personasID']),\
                                                             'TipoPensionID':str(x['TipoPensionID']),\
-                                                            'TipoPension':str(x['TipoPension']),\
                                                             'SemanasMomentoDefinicion':str(x['SemanasMomentoDefinicion']),\
                                                             'SemanasProteccion':str(x['SemanasProteccion']),\
                                                             'SemanasAFP':str(x['SemanasAFP']),\
                                                             'SemanasBono':str(x['SemanasBono']),\
-                                                            'modalidadPension':str(x['modalidadPension'])})                                                                                      
+                                                            'IBLUltimosDiezAnnos':str(x['IBLUltimosDiezAnnos']),\
+                                                            'IBLTodaLaVida':str(x['IBLTodaLaVida']),\
+                                                            'FechaDefinicion':str(x['FechaDefinicion'])})                                                                                     
 
 
 
 
 
     dirty = results["validationsDetected"] | beam.Map(lambda x: \
-                                                            {'InfPersonasID':str(x['InfPersonasID']),\
+                                                            {'DefinicionesID':str(x['DefinicionesID']),\
+                                                            'TiempoID':str(x['TiempoID']),\
+                                                            'FechaDato':str(x['FechaDato']),\
+                                                            'Inf_personasID':str(x['Inf_personasID']),\
                                                             'TipoPensionID':str(x['TipoPensionID']),\
-                                                            'TipoPension':str(x['TipoPension']),\
                                                             'SemanasMomentoDefinicion':str(x['SemanasMomentoDefinicion']),\
                                                             'SemanasProteccion':str(x['SemanasProteccion']),\
                                                             'SemanasAFP':str(x['SemanasAFP']),\
                                                             'SemanasBono':str(x['SemanasBono']),\
-                                                            'modalidadPension':str(x['modalidadPension']),\
+                                                            'IBLUltimosDiezAnnos':str(x['IBLUltimosDiezAnnos']),\
+                                                            'IBLTodaLaVida':str(x['IBLTodaLaVida']),\
+                                                            'FechaDefinicion':str(x['FechaDefinicion']),\
                                                             'validacionDetected':str(x['validacionDetected'])})
 
 
@@ -363,5 +351,5 @@ if __name__ == "__main__":
             schema=table_schema_factDefiniciones,
             write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
             create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED)
-    result = p.run()
-    result.wait_until_finish()
+
+
